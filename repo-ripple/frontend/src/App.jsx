@@ -3,10 +3,7 @@ import ArchitectureCanvas from './ArchitectureCanvas';
 import TaskInput from './TaskInput';
 
 export default function App() {
-  const [blastRadius, setBlastRadius] = useState([
-  { node_id: "checkout.apply_discount", risk: "direct", reason: "function being changed" },
-  { node_id: "invoice.generate", risk: "downstream", reason: "consumes discount output" }
-  ]);
+  const [blastRadius, setBlastRadius] = useState(null);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
