@@ -86,14 +86,24 @@ const centeredMessageStyle = {
   fontSize: '14px',
 };
 
-export default function ArchitectureCanvas({ blastRadius }) {
+// graphData prop: when provided, data is used directly and no fetch is made.
+export default function ArchitectureCanvas({ blastRadius, graphData }) {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [status, setStatus] = useState('loading'); // 'loading' | 'error' | 'ready'
   const baseNodesRef = useRef([]);
 
-  // Fetch graph on mount
+  // Load graph — from prop when available, otherwise fetch from API.
   useEffect(() => {
+    if (graphData) {
+      const rfNodes = toFlowNodes(graphData.nodes || []);
+      const rfEdges = toFlowEdges(graphData.edges || []);
+      baseNodesRef.current = rfNodes;
+      setNodes(rfNodes);
+      setEdges(rfEdges);
+      setStatus('ready');
+      return;
+    }
     const controller = new AbortController();
     fetch(`${API_BASE}/graph`, { signal: controller.signal })
       .then((res) => {
@@ -112,7 +122,7 @@ export default function ArchitectureCanvas({ blastRadius }) {
         if (err.name !== 'AbortError') setStatus('error');
       });
     return () => controller.abort();
-  }, []);
+  }, [graphData]);
 
   // Apply blast-radius colors whenever the prop changes.
   useEffect(() => {

@@ -1,0 +1,249 @@
+{
+  "scenarios": [
+    {
+      "id": "modify_discounts",
+      "task_description": "discounts/discounts.py",
+      "blast_radius": [
+        {
+          "node_id": "discounts.discounts",
+          "risk": "direct",
+          "reason": "Module being modified — owns VALID_CODES table and all discount logic"
+        },
+        {
+          "node_id": "discounts.is_valid_code",
+          "risk": "direct",
+          "reason": "Function in this file — validates whether a code exists in VALID_CODES"
+        },
+        {
+          "node_id": "discounts.get_rate",
+          "risk": "direct",
+          "reason": "Function in this file — looks up the decimal rate for a code"
+        },
+        {
+          "node_id": "discounts.calculate",
+          "risk": "direct",
+          "reason": "Function in this file — applies the rate to an amount and returns the discounted total"
+        },
+        {
+          "node_id": "checkout.apply_discount",
+          "risk": "downstream",
+          "reason": "Calls discounts.is_valid_code and discounts.calculate; any change to validation or arithmetic flows directly into its return value"
+        },
+        {
+          "node_id": "checkout.finalize_order",
+          "risk": "downstream",
+          "reason": "Calls checkout.apply_discount whose result depends on this file; a changed discounted total is passed straight to invoice generation"
+        },
+        {
+          "node_id": "invoice.generate_invoice",
+          "risk": "downstream",
+          "reason": "Receives order_data.total produced by checkout.apply_discount (implicit edge); a wrong discount produces a wrong invoice total"
+        },
+        {
+          "node_id": "invoice.format_invoice",
+          "risk": "downstream",
+          "reason": "Called by invoice.generate_invoice to render the total — wrong upstream total propagates into the formatted output"
+        },
+        {
+          "node_id": "main.main",
+          "risk": "downstream",
+          "reason": "Drives finalize_order end-to-end; the final logged invoice reflects any change in discount arithmetic"
+        }
+      ],
+      "recommended_checks": [
+        "Unit-test discounts.calculate for every entry in VALID_CODES and assert the rounded result matches expected arithmetic",
+        "Verify discounts.is_valid_code returns False for an unrecognised code and that checkout.apply_discount returns the original total unchanged",
+        "Confirm discounts.get_rate returns 0 for unknown codes so calculate never produces a negative total",
+        "Run main.py end-to-end with SAVE10, SAVE20, and HALF and assert the printed invoice total is correct for each"
+      ]
+    },
+    {
+      "id": "modify_inventory",
+      "task_description": "inventory/reserve.py",
+      "blast_radius": [
+        {
+          "node_id": "inventory.reserve",
+          "risk": "direct",
+          "reason": "Module being modified — owns _stock state and all reservation logic"
+        },
+        {
+          "node_id": "inventory.get_stock",
+          "risk": "direct",
+          "reason": "Function in this file — reads current on-hand quantity from _stock"
+        },
+        {
+          "node_id": "inventory.reserve_item",
+          "risk": "direct",
+          "reason": "Function in this file — decrements _stock and guards against over-reservation"
+        },
+        {
+          "node_id": "inventory.release",
+          "risk": "direct",
+          "reason": "Function in this file — increments _stock to free a held reservation"
+        },
+        {
+          "node_id": "inventory.set_reservation_timeout",
+          "risk": "direct",
+          "reason": "Function in this file — configures the global auto-release timeout"
+        },
+        {
+          "node_id": "checkout.finalize_order",
+          "risk": "downstream",
+          "reason": "Calls inventory.reserve_item for each cart item; a change to reservation logic (stock check, decrement, return value) directly affects whether finalize_order succeeds"
+        }
+      ],
+      "recommended_checks": [
+        "Test inventory.reserve_item with sufficient stock, insufficient stock, and exactly-zero stock to confirm correct True/False return and _stock mutation",
+        "Verify inventory.release correctly restores stock and that a reserve followed by release leaves _stock unchanged",
+        "Confirm checkout.finalize_order still completes a full order when stock is sufficient, and handles False from reserve_item gracefully",
+        "Check set_reservation_timeout persists the value and does not affect _stock or reservation logic"
+      ]
+    },
+    {
+      "id": "modify_invoice",
+      "task_description": "invoice/generate.py",
+      "blast_radius": [
+        {
+          "node_id": "invoice.generate",
+          "risk": "direct",
+          "reason": "Module being modified — owns _invoice_counter and all invoice creation logic"
+        },
+        {
+          "node_id": "invoice.format_invoice",
+          "risk": "direct",
+          "reason": "Function in this file — renders the invoice dict into a human-readable string"
+        },
+        {
+          "node_id": "invoice.generate_invoice",
+          "risk": "direct",
+          "reason": "Function in this file — increments the counter, builds the invoice dict, and calls format_invoice"
+        },
+        {
+          "node_id": "checkout.finalize_order",
+          "risk": "downstream",
+          "reason": "Calls invoice.generate_invoice and reads invoice['id'] from the returned dict; a change to the dict shape or counter logic breaks this caller"
+        },
+        {
+          "node_id": "main.main",
+          "risk": "downstream",
+          "reason": "Receives the invoice dict from finalize_order and logs it; a changed dict shape or missing keys surface here at runtime"
+        }
+      ],
+      "recommended_checks": [
+        "Assert invoice.generate_invoice increments _invoice_counter on each call and that the returned dict contains id, items, and total keys",
+        "Test format_invoice with a known invoice dict and assert the output string contains the correct id, item lines, and formatted total",
+        "Verify checkout.finalize_order still reads invoice['id'] correctly after any schema change to the returned dict",
+        "Run main.py and confirm the final log line prints the full invoice dict without KeyError"
+      ]
+    },
+    {
+      "id": "modify_checkout",
+      "task_description": "checkout/checkout.py",
+      "blast_radius": [
+        {
+          "node_id": "checkout.checkout",
+          "risk": "direct",
+          "reason": "Module being modified — imports from discounts, inventory, and invoice; owns the full order-finalisation flow"
+        },
+        {
+          "node_id": "checkout.apply_discount",
+          "risk": "direct",
+          "reason": "Function in this file — validates the code and returns the discounted total"
+        },
+        {
+          "node_id": "checkout.get_order_summary",
+          "risk": "direct",
+          "reason": "Function in this file — returns a summary dict read by main.main"
+        },
+        {
+          "node_id": "checkout.finalize_order",
+          "risk": "direct",
+          "reason": "Function in this file — orchestrates reserve, apply_discount, and generate_invoice"
+        },
+        {
+          "node_id": "discounts.discounts",
+          "risk": "downstream",
+          "reason": "Imported by checkout.checkout (imports edge); changes to the import or usage of discounts symbols affect this module"
+        },
+        {
+          "node_id": "discounts.is_valid_code",
+          "risk": "downstream",
+          "reason": "Called by checkout.apply_discount (calls edge); any change to how apply_discount invokes or interprets this function propagates here"
+        },
+        {
+          "node_id": "discounts.calculate",
+          "risk": "downstream",
+          "reason": "Called by checkout.apply_discount (calls edge); changes to argument passing or result handling affect the discount calculation path"
+        },
+        {
+          "node_id": "inventory.reserve",
+          "risk": "downstream",
+          "reason": "Imported by checkout.checkout (imports edge); changes to how checkout uses the reserve module affect stock state"
+        },
+        {
+          "node_id": "inventory.reserve_item",
+          "risk": "downstream",
+          "reason": "Called by checkout.finalize_order (calls edge); changes to the call site (arguments, loop logic) affect which items get reserved"
+        },
+        {
+          "node_id": "invoice.generate",
+          "risk": "downstream",
+          "reason": "Imported by checkout.checkout (imports edge); changes to how checkout constructs or passes order_data affect invoice correctness"
+        },
+        {
+          "node_id": "invoice.generate_invoice",
+          "risk": "downstream",
+          "reason": "Called by checkout.finalize_order (calls edge) and implicitly receives the discounted total via checkout.apply_discount (implicit edge)"
+        },
+        {
+          "node_id": "main.main",
+          "risk": "downstream",
+          "reason": "Calls checkout.get_order_summary and checkout.finalize_order (calls edges); any signature or return-value change in this file breaks the entry point"
+        }
+      ],
+      "recommended_checks": [
+        "Test finalize_order end-to-end with a valid code and assert stock is decremented, the total is discounted, and the returned invoice dict is correct",
+        "Verify apply_discount returns cart_total unchanged for an invalid code and the correct discounted value for each valid code",
+        "Confirm get_order_summary always returns a dict with at least items, subtotal, and status keys",
+        "Run main.py and assert no import errors, no KeyError on invoice fields, and the printed output matches expected values"
+      ]
+    },
+    {
+      "id": "modify_main",
+      "task_description": "main.py",
+      "blast_radius": [
+        {
+          "node_id": "main",
+          "risk": "direct",
+          "reason": "Module being modified — entry point that imports and drives the entire order flow"
+        },
+        {
+          "node_id": "main.main",
+          "risk": "direct",
+          "reason": "Function in this file — calls get_order_summary and finalize_order and logs results"
+        },
+        {
+          "node_id": "checkout.checkout",
+          "risk": "downstream",
+          "reason": "Imported by main (imports edge); any change to which symbols are imported or how they are called affects checkout behaviour"
+        },
+        {
+          "node_id": "checkout.get_order_summary",
+          "risk": "downstream",
+          "reason": "Called by main.main (calls edge); changes to the call site or how its return value is used surface here"
+        },
+        {
+          "node_id": "checkout.finalize_order",
+          "risk": "downstream",
+          "reason": "Called by main.main (calls edge) with a hardcoded cart and code; changes to arguments passed here affect the full downstream order and invoice flow"
+        }
+      ],
+      "recommended_checks": [
+        "Run main.py directly and assert exit code 0 with no unhandled exceptions",
+        "Verify the cart dict and discount code passed to finalize_order match the items present in inventory._stock",
+        "Confirm the logged invoice output contains the expected id, items, and total fields",
+        "Check that changes to main.py do not alter the public API of any imported module (main should only be a consumer, not a mutator)"
+      ]
+    }
+  ]
+}

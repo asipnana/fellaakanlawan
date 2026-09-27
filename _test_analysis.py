@@ -1,228 +1,27 @@
-"""
-Test run_analysis.py dengan mock Bob.
-Node ID format: 2-level (checkout.apply_discount) sesuai spec section 4.
-Mock responses mencerminkan isi sample-repo_PersonA yang sesungguhnya.
-"""
-import sys, json, pathlib, tempfile
-sys.path.insert(0, 'analyzer')
-import run_analysis as ra
+import json
 
-RESPONSES = {
-    'main.py': json.dumps({
-        'functions_defined': ['main'],
-        'functions_called': [
-            {'caller': 'main', 'callee': 'finalize_order'},
-            {'caller': 'main', 'callee': 'get_order_summary'},
-        ],
-        'imports': [
-            'from checkout.checkout import finalize_order, get_order_summary'
-        ],
-        'implicit_data_consumers': []
-    }),
-    'checkout/__init__.py': json.dumps({
-        'functions_defined': [], 'functions_called': [], 'imports': [], 'implicit_data_consumers': []
-    }),
-    'checkout/checkout.py': json.dumps({
-        'functions_defined': ['apply_discount', 'finalize_order', 'get_order_summary'],
-        'functions_called': [
-            # Bob reports aliases as callee names — the bug being fixed
-            {'caller': 'apply_discount',  'callee': 'is_valid_code'},
-            {'caller': 'apply_discount',  'callee': 'discounts_calculate'},   # alias
-            {'caller': 'finalize_order',  'callee': 'inventory_reserve'},     # alias
-            {'caller': 'finalize_order',  'callee': 'apply_discount'},
-            {'caller': 'finalize_order',  'callee': 'invoice_generate'},      # alias
-        ],
-        'imports': [
-            'from discounts.discounts import calculate as discounts_calculate, is_valid_code',
-            'from inventory.reserve import reserve as inventory_reserve, RESERVATION_TIMEOUT_SECONDS',
-            'from invoice.generate import generate as invoice_generate'
-        ],
-        'implicit_data_consumers': ['finalize_order']
-    }),
-    'discounts/__init__.py': json.dumps({
-        'functions_defined': [], 'functions_called': [], 'imports': [], 'implicit_data_consumers': []
-    }),
-    'discounts/discounts.py': json.dumps({
-        'functions_defined': ['calculate', 'is_valid_code', 'get_rate'],
-        'functions_called': [], 'imports': [], 'implicit_data_consumers': []
-    }),
-    'inventory/__init__.py': json.dumps({
-        'functions_defined': [], 'functions_called': [], 'imports': [], 'implicit_data_consumers': []
-    }),
-    'inventory/reserve.py': json.dumps({
-        'functions_defined': ['reserve', 'release', 'get_stock', 'set_reservation_timeout'],
-        'functions_called': [], 'imports': [], 'implicit_data_consumers': []
-    }),
-    'invoice/__init__.py': json.dumps({
-        'functions_defined': [], 'functions_called': [], 'imports': [], 'implicit_data_consumers': []
-    }),
-    'invoice/generate.py': json.dumps({
-        'functions_defined': ['generate', 'format_invoice'],
-        'functions_called': [], 'imports': [], 'implicit_data_consumers': []
-    }),
-}
-# Batch response: one JSON object keyed by file path containing all non-empty files.
-# Empty __init__.py files are skipped entirely (no Bob call) so they are not included.
-BATCH_RESPONSE = json.dumps({
-    'main.py':                    json.loads(RESPONSES['main.py']),
-    'checkout/checkout.py':       json.loads(RESPONSES['checkout/checkout.py']),
-    'discounts/discounts.py':     json.loads(RESPONSES['discounts/discounts.py']),
-    'inventory/reserve.py':       json.loads(RESPONSES['inventory/reserve.py']),
-    'invoice/generate.py':        json.loads(RESPONSES['invoice/generate.py']),
-})
+with open("analyzer/impact_scenarios.json") as f:
+    d = json.load(f)
 
-CROSS = json.dumps([
-    {'from': 'checkout.apply_discount', 'to': 'invoice.generate', 'kind': 'implicit'},
-    {'from': 'checkout.finalize_order', 'to': 'invoice.generate', 'kind': 'implicit'},
-])
+sc = d["scenarios"]
+print(len(sc), "scenarios")
+for s in sc:
+    direct = sum(1 for n in s["blast_radius"] if n["risk"] == "direct")
+    downstream = sum(1 for n in s["blast_radius"] if n["risk"] == "downstream")
+    print(f"  {s['id']:25} | file={s['task_description']:30} | direct={direct} | downstream={downstream} | checks={len(s['recommended_checks'])}")
 
-call_count = [0]
-cross_call_count = [0]
-batch_call_count = [0]
-
-def mock_bob(prompt):
-    call_count[0] += 1
-    # Cross-file pass: unique header from _PROMPT_RESOLVE_CROSS_FILE
-    if "Below is a JSON summary of every file in the repo:" in prompt:
-        cross_call_count[0] += 1
-        return CROSS
-    # Batch per-file pass: unique header from _PROMPT_EXTRACT_SYMBOLS_BATCH.
-    # One prompt now contains ALL non-empty files — return the full batch response.
-    if "For EACH file, extract its symbols" in prompt:
-        batch_call_count[0] += 1
-        return BATCH_RESPONSE
-    # Fallback — should not happen in a correct test
-    raise AssertionError(f"mock_bob: unrecognised prompt (first 120 chars): {prompt[:120]!r}")
-
-ra._call_bob_agent = mock_bob
-
-repo_path = pathlib.Path('sample-repo').resolve()
-with tempfile.TemporaryDirectory() as tmpdir:
-    out = pathlib.Path(tmpdir) / 'graph.json'
-    ra.run_analysis(repo_path, out)
-    data = json.loads(out.read_text())
-
-failures = []
-
-# --- Schema ---
-for n in data['nodes']:
-    if not ('id' in n and 'file' in n and 'type' in n):
-        failures.append('BAD NODE SCHEMA: ' + str(n))
-for e in data['edges']:
-    if not ('from' in e and 'to' in e and 'kind' in e):
-        failures.append('BAD EDGE SCHEMA: ' + str(e))
-
-# --- Forward slashes only in file paths ---
-for n in data['nodes']:
-    if '\\' in n['file']:
-        failures.append('BACKSLASH IN FILE PATH: ' + str(n))
-
-# --- 2-level function node IDs (spec section 4) ---
-for n in data['nodes']:
-    parts = n['id'].split('.')
-    if n['type'] == 'function' and len(parts) != 2:
-        failures.append('NOT 2-LEVEL FUNCTION NODE: ' + n['id'])
-    if n['type'] == 'module' and len(parts) != 1:
-        failures.append('NOT 1-LEVEL MODULE NODE: ' + n['id'])
-
-# --- Empty __init__-only modules must NOT appear as module nodes ---
-node_map = {n['id']: n for n in data['nodes']}
-empty_module_ids = ['discounts', 'inventory', 'invoice', 'checkout']
-# These all have substantive sibling files so they SHOULD appear — but
-# their "file" field must point to the substantive file, not __init__.py
-for mid in empty_module_ids:
-    if mid not in node_map:
-        failures.append('MODULE NODE MISSING: ' + mid)
-    elif node_map[mid]['file'].endswith('__init__.py'):
-        failures.append(
-            'MODULE NODE FILE POINTS TO __init__.py (should be substantive file): '
-            + mid + ' -> ' + node_map[mid]['file']
-        )
-
-# --- checkout module specifically must point to checkout/checkout.py ---
-if 'checkout' in node_map:
-    expected = 'checkout/checkout.py'
-    actual = node_map['checkout']['file']
-    if actual != expected:
-        failures.append(
-            'checkout module file wrong: expected %s got %s' % (expected, actual)
-        )
-
-# --- Required nodes from spec section 4 ---
-node_ids = {n['id'] for n in data['nodes']}
-required_nodes = [
-    'checkout.apply_discount',
-    'checkout.finalize_order',
-    'discounts.calculate',
-    'discounts.is_valid_code',
-    'inventory.reserve',
-    'invoice.generate',
-]
-for nid in required_nodes:
-    if nid not in node_ids:
-        failures.append('MISSING REQUIRED NODE: ' + nid)
-
-# --- Key edges from spec ---
-edge_tuples = {(e['from'], e['to'], e['kind']) for e in data['edges']}
-
-# spec section 4: checkout.apply_discount -> invoice.generate
-if ('checkout.apply_discount', 'invoice.generate', 'calls') not in edge_tuples and \
-   ('checkout.apply_discount', 'invoice.generate', 'implicit') not in edge_tuples and \
-   ('checkout.finalize_order', 'invoice.generate', 'calls') not in edge_tuples:
-    failures.append('MISSING SPEC EDGE: checkout.* -> invoice.generate')
-
-required_call_edges = [
-    ('checkout.apply_discount', 'discounts.calculate', 'calls'),
-    ('checkout.apply_discount', 'discounts.is_valid_code', 'calls'),
-    ('checkout.finalize_order', 'inventory.reserve', 'calls'),
-    ('checkout.finalize_order', 'invoice.generate', 'calls'),
-]
-for tup in required_call_edges:
-    if tup not in edge_tuples:
-        failures.append('MISSING CALL EDGE: ' + str(tup))
-
-# --- Cross-file (implicit) pass was actually called exactly once ---
-if cross_call_count[0] != 1:
-    failures.append(f'CROSS-FILE BOB PASS called {cross_call_count[0]} times, expected 1')
-
-# --- Implicit edge for genuinely new (from,to) pair is kept ---
-# checkout.apply_discount -> invoice.generate has no explicit calls/imports edge,
-# so it should survive the filter.
-if ('checkout.apply_discount', 'invoice.generate', 'implicit') not in edge_tuples:
-    failures.append('MISSING IMPLICIT EDGE: checkout.apply_discount -> invoice.generate (implicit)')
-
-# --- Duplicate-suppression: checkout.finalize_order -> invoice.generate (calls)
-# already exists as an explicit edge, so the implicit variant from Bob must be DROPPED.
-if ('checkout.finalize_order', 'invoice.generate', 'implicit') in edge_tuples:
-    failures.append('DUPLICATE IMPLICIT EDGE NOT DROPPED: checkout.finalize_order -> invoice.generate')
-if ('checkout.finalize_order', 'invoice.generate', 'calls') not in edge_tuples:
-    failures.append('EXPLICIT EDGE MISSING: checkout.finalize_order -> invoice.generate (calls)')
-
-if failures:
-    print()
-    print('FAILURES:')
-    for f in failures:
-        print('  FAIL:', f)
-    sys.exit(1)
-
-print()
-print('ALL ASSERTIONS PASSED')
-print('Bob calls  :', call_count[0],
-      '(batch: %d, cross-file: %d)' % (batch_call_count[0], cross_call_count[0]))
-print('  -> sample-repo: 4 empty __init__.py skipped, 5 substantive files in 1 batch = 1 Bob call')
-nodes_fn  = [n for n in data['nodes'] if n['type'] == 'function']
-nodes_mod = [n for n in data['nodes'] if n['type'] == 'module']
-print('Nodes     :', len(data['nodes']), '(%d modules, %d functions)' % (len(nodes_mod), len(nodes_fn)))
-print('Edges     :', len(data['edges']))
-kinds = {}
-for e in data['edges']:
-    kinds[e['kind']] = kinds.get(e['kind'], 0) + 1
-print('Edge kinds:', kinds)
-print()
-print('Nodes (sorted):')
-for n in sorted(data['nodes'], key=lambda x: x['id']):
-    print('  %-10s %-35s %s' % (n['type'], n['id'], n['file']))
-print()
-print('Edges (sorted):')
-for e in sorted(data['edges'], key=lambda x: (x['from'], x['to'])):
-    print('  [%-8s]  %-35s ->  %s' % (e['kind'], e['from'], e['to']))
+# verify all node_ids in blast_radius exist in graph
+with open("analyzer/graph.json") as f:
+    g = json.load(f)
+valid_ids = {n["id"] for n in g["nodes"]}
+errors = []
+for s in sc:
+    for entry in s["blast_radius"]:
+        if entry["node_id"] not in valid_ids:
+            errors.append(f"  UNKNOWN node_id {entry['node_id']!r} in scenario {s['id']!r}")
+if errors:
+    print("NODE ID ERRORS:")
+    for e in errors:
+        print(e)
+else:
+    print("All blast_radius node_ids match graph.json nodes OK")

@@ -29,10 +29,19 @@ const labelStyle = {
   textAlign: 'left',
 };
 
+// SVG chevron that matches the muted palette colour, used as a custom arrow.
+const CHEVRON_SVG = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238ECAE6'/%3E%3C/svg%3E")`;
+
+const selectWrapStyle = {
+  position: 'relative',
+  width: '100%',
+};
+
 const selectStyle = {
   display: 'block',
   width: '100%',
-  padding: '7px 10px',
+  // left padding for text, right padding keeps text clear of the chevron arrow
+  padding: '8px 32px 8px 10px',
   background: '#0B2545',
   color: PANEL.text,
   fontFamily: PANEL.fontMono,
@@ -41,18 +50,33 @@ const selectStyle = {
   borderRadius: '2px',
   outline: 'none',
   cursor: 'pointer',
+  // Remove native OS chrome so our custom arrow shows instead
   appearance: 'none',
   WebkitAppearance: 'none',
+  MozAppearance: 'none',
+  // Clip long text with an ellipsis rather than wrapping or overflowing
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+  boxSizing: 'border-box',
+  // Custom chevron arrow painted as a background image on the right side
+  backgroundImage: CHEVRON_SVG,
+  backgroundRepeat: 'no-repeat',
+  backgroundPosition: 'right 10px center',
+  backgroundSize: '10px 6px',
 };
 
 const sheetTitleStyle = {
-  marginTop: '14px',
-  color: PANEL.text,
+  marginTop: '10px',
+  color: PANEL.muted,
   fontFamily: PANEL.fontSans,
-  fontSize: '14px',
-  fontWeight: 600,
+  fontSize: '12px',
+  fontWeight: 400,
   textAlign: 'left',
-  lineHeight: 1.4,
+  lineHeight: 1.5,
+  // Allow long file paths to wrap rather than overflow the sidebar
+  wordBreak: 'break-word',
+  overflowWrap: 'break-word',
 };
 
 const messageStyle = {
@@ -64,11 +88,17 @@ const messageStyle = {
   lineHeight: 1.5,
 };
 
-export default function TaskInput({ onScenarioSelected, selectedScenario }) {
+// scenarioData prop: when provided, data is used directly and no fetch is made.
+export default function TaskInput({ onScenarioSelected, selectedScenario, scenarioData }) {
   const [scenarios, setScenarios] = useState([]);
   const [fetchState, setFetchState] = useState('loading'); // 'loading' | 'ready' | 'error'
 
   useEffect(() => {
+    if (scenarioData) {
+      setScenarios(scenarioData.scenarios || []);
+      setFetchState('ready');
+      return;
+    }
     const controller = new AbortController();
     fetch(`${API_BASE}/impact/scenarios`, { signal: controller.signal })
       .then((res) => {
@@ -83,7 +113,7 @@ export default function TaskInput({ onScenarioSelected, selectedScenario }) {
         if (err.name !== 'AbortError') setFetchState('error');
       });
     return () => controller.abort();
-  }, []);
+  }, [scenarioData]);
 
   function handleChange(e) {
     const id = e.target.value;
@@ -116,18 +146,20 @@ export default function TaskInput({ onScenarioSelected, selectedScenario }) {
       )}
 
       {fetchState === 'ready' && scenarios.length > 0 && (
-        <select
-          style={selectStyle}
-          value={selectedScenario?.task_description || ''}
-          onChange={handleChange}
-        >
-          <option value="">Select a scenario…</option>
-          {scenarios.map((s) => (
-            <option key={s.task_description} value={s.task_description}>
-              {s.task_description}
-            </option>
-          ))}
-        </select>
+        <div style={selectWrapStyle}>
+          <select
+            style={selectStyle}
+            value={selectedScenario?.task_description || ''}
+            onChange={handleChange}
+          >
+            <option value="">Select a scenario…</option>
+            {scenarios.map((s) => (
+              <option key={s.task_description} value={s.task_description}>
+                {s.task_description}
+              </option>
+            ))}
+          </select>
+        </div>
       )}
 
       {selectedScenario && (

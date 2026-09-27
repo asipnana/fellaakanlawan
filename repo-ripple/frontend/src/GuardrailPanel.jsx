@@ -1,6 +1,4 @@
-import { useState } from 'react';
-
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+import { useState, useEffect } from 'react';
 
 // ── Blueprint palette ─────────────────────────────────────────────────────────
 const PANEL = {
@@ -88,20 +86,6 @@ const buttonStyle = {
   transition: 'color 0.2s, border-color 0.2s',
 };
 
-const buttonLoadingStyle = {
-  ...buttonStyle,
-  color: PANEL.dimmed,
-  borderColor: PANEL.dimmed,
-  cursor: 'not-allowed',
-};
-
-const errorStyle = {
-  marginTop: '10px',
-  color: PANEL.directColor,
-  fontFamily: PANEL.fontMono,
-  fontSize: '12px',
-};
-
 const scaffoldBlockStyle = {
   marginTop: '16px',
   display: 'flex',
@@ -133,36 +117,48 @@ const codeBlockStyle = {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 export default function GuardrailPanel({ blastRadius, recommendedChecks }) {
-  const [scaffoldState, setScaffoldState] = useState('idle'); // 'idle' | 'loading' | 'done' | 'error'
+  const [scaffoldState, setScaffoldState] = useState('idle'); // 'idle' | 'done'
   const [scaffoldFiles, setScaffoldFiles] = useState([]);
-  const [scaffoldError, setScaffoldError] = useState('');
+
+  // Reset stubs whenever the selected scenario (and therefore blastRadius) changes.
+  useEffect(() => {
+    setScaffoldFiles([]);
+    setScaffoldState('idle');
+  }, [blastRadius]);
 
   const nothingSelected = blastRadius === undefined || blastRadius === null;
   const emptyBlast = !nothingSelected && (!blastRadius || blastRadius.length === 0);
 
   function handleGenerateScaffolds() {
-    setScaffoldState('loading');
-    setScaffoldFiles([]);
-    setScaffoldError('');
-
-    fetch(`${API_BASE}/impact/scaffold-tests`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ blast_radius: blastRadius }),
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((data) => {
-        // Expect: { files: [{ filename, content }] }
-        setScaffoldFiles(data.files || []);
-        setScaffoldState('done');
-      })
-      .catch((err) => {
-        setScaffoldError(err.message || 'Request failed');
-        setScaffoldState('error');
-      });
+    const stubs = blastRadius.map((item) => {
+      const safeName = item.node_id.replace(/\./g, '_');
+      const riskContext = item.reason
+        ? `# Risk context: ${item.reason}`
+        : `# Target: ${item.node_id}`;
+      const stub = [
+        'import pytest',
+        'from unittest.mock import patch, MagicMock',
+        '',
+        '',
+        `def test_${safeName}():`,
+        `    ${riskContext}`,
+        `    # Risk level: ${item.risk}`,
+        '    ',
+        '    # Arrange',
+        '    # TODO: set up any required fixtures or mock dependencies',
+        '    ',
+        '    # Act',
+        '    # TODO: call the function or trigger the behavior under test',
+        '    ',
+        '    # Assert',
+        '    # TODO: verify the expected outcome',
+        '    ',
+        '    pytest.fail("Test not implemented yet - refer to verification checklist")',
+      ].join('\n');
+      return { node_id: item.node_id, stub };
+    });
+    setScaffoldFiles(stubs);
+    setScaffoldState('done');
   }
 
   // ── Empty states ────────────────────────────────────────────────────────────
@@ -264,31 +260,16 @@ export default function GuardrailPanel({ blastRadius, recommendedChecks }) {
         </button>
       )}
 
-      {scaffoldState === 'loading' && (
-        <button style={buttonLoadingStyle} disabled>
-          Generating…
-        </button>
-      )}
-
-      {scaffoldState === 'error' && (
-        <>
-          <button style={buttonStyle} onClick={handleGenerateScaffolds}>
-            Retry
-          </button>
-          <p style={errorStyle}>Error: {scaffoldError}</p>
-        </>
-      )}
-
       {scaffoldState === 'done' && scaffoldFiles.length === 0 && (
-        <p style={emptyStateStyle}>No stub files returned by the backend.</p>
+        <p style={emptyStateStyle}>No stubs generated.</p>
       )}
 
       {scaffoldState === 'done' && scaffoldFiles.length > 0 && (
         <div style={scaffoldBlockStyle}>
-          {scaffoldFiles.map((f) => (
-            <div key={f.filename}>
-              <p style={fileHeadStyle}>{f.filename}</p>
-              <pre style={codeBlockStyle}>{f.content}</pre>
+          {scaffoldFiles.map((item) => (
+            <div key={item.node_id}>
+              <p style={fileHeadStyle}>{item.node_id}</p>
+              <pre style={codeBlockStyle}><code>{item.stub}</code></pre>
             </div>
           ))}
         </div>
