@@ -1,3 +1,4 @@
 streamlit>=1.35.0
 fastapi>=0.100.0
 uvicorn>=0.24.0
+graphviz>=0.20.0
