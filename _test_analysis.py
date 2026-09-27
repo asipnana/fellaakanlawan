@@ -61,6 +61,16 @@ RESPONSES = {
         'functions_called': [], 'imports': [], 'implicit_data_consumers': []
     }),
 }
+# Batch response: one JSON object keyed by file path containing all non-empty files.
+# Empty __init__.py files are skipped entirely (no Bob call) so they are not included.
+BATCH_RESPONSE = json.dumps({
+    'main.py':                    json.loads(RESPONSES['main.py']),
+    'checkout/checkout.py':       json.loads(RESPONSES['checkout/checkout.py']),
+    'discounts/discounts.py':     json.loads(RESPONSES['discounts/discounts.py']),
+    'inventory/reserve.py':       json.loads(RESPONSES['inventory/reserve.py']),
+    'invoice/generate.py':        json.loads(RESPONSES['invoice/generate.py']),
+})
+
 CROSS = json.dumps([
     {'from': 'checkout.apply_discount', 'to': 'invoice.generate', 'kind': 'implicit'},
     {'from': 'checkout.finalize_order', 'to': 'invoice.generate', 'kind': 'implicit'},
@@ -68,20 +78,19 @@ CROSS = json.dumps([
 
 call_count = [0]
 cross_call_count = [0]
+batch_call_count = [0]
 
 def mock_bob(prompt):
     call_count[0] += 1
-    # Cross-file pass prompt contains this unique header line from the
-    # _PROMPT_RESOLVE_CROSS_FILE template — per-file prompts never contain it.
-    # Do NOT use file path substrings: cross-file JSON body contains every
-    # file path as a field value, causing false matches.
+    # Cross-file pass: unique header from _PROMPT_RESOLVE_CROSS_FILE
     if "Below is a JSON summary of every file in the repo:" in prompt:
         cross_call_count[0] += 1
         return CROSS
-    # Per-file pass: match on "File path: <key>" which is unique to each file prompt
-    for file_key, resp in RESPONSES.items():
-        if f"File path: {file_key}" in prompt:
-            return resp
+    # Batch per-file pass: unique header from _PROMPT_EXTRACT_SYMBOLS_BATCH.
+    # One prompt now contains ALL non-empty files — return the full batch response.
+    if "For EACH file, extract its symbols" in prompt:
+        batch_call_count[0] += 1
+        return BATCH_RESPONSE
     # Fallback — should not happen in a correct test
     raise AssertionError(f"mock_bob: unrecognised prompt (first 120 chars): {prompt[:120]!r}")
 
@@ -198,7 +207,9 @@ if failures:
 
 print()
 print('ALL ASSERTIONS PASSED')
-print('Bob calls  :', call_count[0], '(per-file: %d, cross-file: %d)' % (call_count[0] - cross_call_count[0], cross_call_count[0]))
+print('Bob calls  :', call_count[0],
+      '(batch: %d, cross-file: %d)' % (batch_call_count[0], cross_call_count[0]))
+print('  -> sample-repo: 4 empty __init__.py skipped, 5 substantive files in 1 batch = 1 Bob call')
 nodes_fn  = [n for n in data['nodes'] if n['type'] == 'function']
 nodes_mod = [n for n in data['nodes'] if n['type'] == 'module']
 print('Nodes     :', len(data['nodes']), '(%d modules, %d functions)' % (len(nodes_mod), len(nodes_fn)))

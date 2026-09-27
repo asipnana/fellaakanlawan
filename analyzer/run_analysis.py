@@ -17,11 +17,17 @@ or with a custom repo path:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import sys
 from pathlib import Path
 from typing import Any
+
+# Maximum number of non-empty files sent to Bob in a single batch prompt.
+# With BATCH_SIZE=3 and our current sample-repo (5 substantive files after
+# skipping empty __init__.py files), this produces 2 batches = 2 Bob calls.
+BATCH_SIZE = 3
 
 # ---------------------------------------------------------------------------
 # Bob integration
@@ -40,26 +46,28 @@ except ImportError:
 # Bob prompt templates
 # ---------------------------------------------------------------------------
 
-_PROMPT_EXTRACT_SYMBOLS = """\
-You are analyzing a Python source file as part of a dependency-graph analysis.
+_PROMPT_EXTRACT_SYMBOLS_BATCH = """\
+You are analyzing a batch of Python source files as part of a dependency-graph analysis.
 
-File path: {file_path}
-File contents:
-```python
-{source}
-```
+{files_block}
 
-Extract and return a JSON object with exactly these fields:
+For EACH file, extract its symbols and return a single JSON object whose keys are
+the file paths listed above and whose values each have exactly these fields:
 - "functions_defined": list of function names defined at module or class level
 - "functions_called": list of objects like {{"caller": "<fn_name>", "callee": "<fn_name>"}}
   where caller is a function defined in this file and callee is any function it calls
   (exclude Python builtins like print, len, max, range, etc.)
 - "imports": list of import strings exactly as written in the file
-  (e.g. "from discounts.calculate import calculate, is_valid_coupon" or "import os")
+  (e.g. "from discounts.discounts import calculate as discounts_calculate, is_valid_code")
 - "implicit_data_consumers": list of function names in this file that consume the
   return value of a function from another module (even without a direct import)
 
-Return ONLY the JSON object — no prose, no markdown fences.
+Return ONLY the JSON object keyed by file path — no prose, no markdown fences.
+Example shape (two files):
+{{
+  "checkout/checkout.py": {{"functions_defined": [...], "functions_called": [...], "imports": [...], "implicit_data_consumers": [...]}},
+  "discounts/discounts.py": {{"functions_defined": [...], "functions_called": [...], "imports": [...], "implicit_data_consumers": [...]}}
+}}
 """
 
 _PROMPT_RESOLVE_CROSS_FILE = """\
@@ -98,26 +106,35 @@ def _call_bob_agent(prompt: str) -> str:
         response = session.run(prompt)
         return response.text if hasattr(response, "text") else str(response)
 
-    # CLI fallback — write prompt to a temp file, run `bob agent --prompt-file`
+    # CLI fallback — run `bob run "<prompt>"` in headless mode.
+    # bob.cmd is the Windows wrapper for the npm-installed bob CLI.
     import subprocess
-    import tempfile
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, encoding="utf-8"
-    ) as tmp:
-        tmp.write(prompt)
-        tmp_path = tmp.name
-
-    try:
-        result = subprocess.run(
-            ["bob", "agent", "--prompt-file", tmp_path],
-            capture_output=True,
-            text=True,
-            check=True,
+    result = subprocess.run(
+        ["bob.cmd", "run", "--format", "json", prompt],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"bob CLI exited with code {result.returncode}.\n"
+            f"stderr: {result.stderr[:800]}"
         )
+    # `bob run --format json` emits a JSON envelope; extract the text content.
+    try:
+        envelope = json.loads(result.stdout)
+        # Shape: {"result": {"content": [{"type": "text", "text": "..."}]}}
+        content_blocks = (
+            envelope.get("result", {}).get("content", [])
+            or envelope.get("content", [])
+        )
+        for block in content_blocks:
+            if isinstance(block, dict) and block.get("type") == "text":
+                return block["text"]
+        # Fallback: return raw stdout if structure differs
         return result.stdout
-    finally:
-        os.unlink(tmp_path)
+    except (json.JSONDecodeError, AttributeError):
+        return result.stdout
 
 
 def _parse_bob_json(raw: str) -> Any:
@@ -185,28 +202,73 @@ def _module_id_from_path(file_path: Path, repo_root: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Per-file analysis (calls Bob once per file)
+# Per-file emptiness check and batch analysis
 # ---------------------------------------------------------------------------
 
-def analyze_file_with_bob(file_path: Path, repo_root: Path) -> dict:
+_EMPTY_FINDINGS: dict = {
+    "functions_defined": [],
+    "functions_called": [],
+    "imports": [],
+    "implicit_data_consumers": [],
+}
+
+
+def _is_empty_file(file_path: Path) -> bool:
     """
-    Use IBM Bob (Agent mode) to extract symbols, calls, and imports from one
-    Python source file. Returns Bob's structured findings enriched with
-    module_id and file fields.
+    Return True if the file has zero substantive lines after stripping
+    comments and blank lines.  Used to skip trivially empty files (e.g.
+    bare __init__.py) without sending them to Bob.
     """
-    source = file_path.read_text(encoding="utf-8")
-    rel_path = _to_forward_slash(str(file_path.relative_to(repo_root)))
-    prompt = _PROMPT_EXTRACT_SYMBOLS.format(file_path=rel_path, source=source)
+    for line in file_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            return False
+    return True
+
+
+def analyze_batch_with_bob(
+    batch: list[tuple[Path, str, str]],  # (file_path, rel_path, source)
+    repo_root: Path,
+) -> list[dict]:
+    """
+    Send a single Bob prompt for a batch of files and split the response
+    back into per-file findings dicts (each enriched with module_id + file).
+
+    batch     — list of (file_path, rel_path, source) tuples, all non-empty files.
+    repo_root — root of the repo being analyzed (needed for _module_id_from_path).
+    Returns one findings dict per file in the same order as `batch`.
+    """
+    # Build the files_block: path header + fenced source for each file
+    blocks = []
+    for _, rel_path, source in batch:
+        blocks.append(
+            f"File path: {rel_path}\n"
+            f"File contents:\n```python\n{source}\n```"
+        )
+    files_block = "\n\n".join(blocks)
+
+    prompt = _PROMPT_EXTRACT_SYMBOLS_BATCH.format(files_block=files_block)
     raw = _call_bob_agent(prompt)
-    findings = _parse_bob_json(raw)
 
-    # Bob must return a dict; guard against malformed responses
-    if not isinstance(findings, dict):
-        findings = {}
+    try:
+        parsed = _parse_bob_json(raw)
+    except ValueError:
+        parsed = {}
 
-    findings["module_id"] = _module_id_from_path(file_path, repo_root)
-    findings["file"] = rel_path
-    return findings
+    # Bob should return a dict keyed by file path; guard against malformed output
+    if not isinstance(parsed, dict):
+        parsed = {}
+
+    results: list[dict] = []
+    for file_path, rel_path, _ in batch:
+        # Look up by the exact rel_path key we sent to Bob
+        file_findings = parsed.get(rel_path)
+        if not isinstance(file_findings, dict):
+            file_findings = {}
+        file_findings["module_id"] = _module_id_from_path(file_path, repo_root)
+        file_findings["file"] = rel_path
+        results.append(file_findings)
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -489,14 +551,62 @@ def run_analysis(repo_path: Path, output_path: Path) -> dict:
     if not python_files:
         raise FileNotFoundError(f"No Python files found under {repo_path}")
 
-    # Step 1 & 2 — per-file Bob analysis
-    print(f"[1/4] Found {len(python_files)} Python files — calling IBM Bob per file...")
+    # Step 1 & 2 — skip empty files, batch non-empty files, call Bob in parallel
+
+    # Partition: empty files get synthesized findings, non-empty files go to Bob
+    empty_findings: list[dict] = []
+    non_empty: list[tuple[Path, str, str]] = []  # (file_path, rel_path, source)
+    for py_file in python_files:
+        rel = _to_forward_slash(str(py_file.relative_to(repo_path)))
+        if _is_empty_file(py_file):
+            print(f"      skip (empty) > {rel}")
+            f = dict(_EMPTY_FINDINGS)
+            f["module_id"] = _module_id_from_path(py_file, repo_path)
+            f["file"] = rel
+            empty_findings.append(f)
+        else:
+            source = py_file.read_text(encoding="utf-8")
+            non_empty.append((py_file, rel, source))
+
+    # Split non-empty files into batches of BATCH_SIZE
+    batches: list[list[tuple[Path, str, str]]] = [
+        non_empty[i: i + BATCH_SIZE] for i in range(0, max(len(non_empty), 1), BATCH_SIZE)
+    ]
+    # Guard: if non_empty is empty, batches should be empty too
+    if not non_empty:
+        batches = []
+
+    print(
+        f"[1/4] Found {len(python_files)} Python files "
+        f"({len(non_empty)} non-empty -> {len(batches)} batch(es), "
+        f"{len(python_files) - len(non_empty)} skipped as empty) "
+        f"— calling IBM Bob..."
+    )
+
+    # Submit all batches in parallel (ThreadPoolExecutor, max 5 workers)
+    batch_results: list[list[dict]] = [[] for _ in batches]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_idx = {
+            executor.submit(analyze_batch_with_bob, batch, repo_path): idx
+            for idx, batch in enumerate(batches)
+        }
+        for future in concurrent.futures.as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            batch_results[idx] = future.result()
+
+    # Flatten batch results in original file order, then append empty-file findings
+    non_empty_findings: list[dict] = [f for batch in batch_results for f in batch]
+
+    # Restore original file order: merge empty + non-empty by their rel path
+    non_empty_by_rel = {f["file"]: f for f in non_empty_findings}
+    empty_by_rel = {f["file"]: f for f in empty_findings}
     per_file_findings: list[dict] = []
     for py_file in python_files:
         rel = _to_forward_slash(str(py_file.relative_to(repo_path)))
-        print(f"      Bob > {rel}")
-        findings = analyze_file_with_bob(py_file, repo_path)
-        per_file_findings.append(findings)
+        if rel in non_empty_by_rel:
+            per_file_findings.append(non_empty_by_rel[rel])
+        else:
+            per_file_findings.append(empty_by_rel[rel])
 
     # Step 3 — nodes
     print("[2/4] Building graph nodes from Bob's findings...")
