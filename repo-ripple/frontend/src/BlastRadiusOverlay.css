@@ -1,0 +1,56 @@
+/* BlastRadiusOverlay.css — custom node styles and CSS-only tooltip */
+
+.blast-node {
+  position: relative;
+  padding: 8px 12px;
+  border-radius: 3px;
+  min-width: 160px;
+  max-width: 220px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: default;
+  /* The one allowed animation: color/glow transition on scenario select */
+  transition: border-color 0.3s ease, box-shadow 0.3s ease, background 0.3s ease;
+}
+
+.blast-node__label {
+  display: block;
+  font-weight: 500;
+  color: #F4F7FA;
+  word-break: break-all;
+}
+
+.blast-node__file {
+  display: block;
+  font-size: 10px;
+  color: #8ECAE6;
+  margin-top: 2px;
+  word-break: break-all;
+}
+
+/* ── Tooltip (CSS-only, shown on hover when reason is present) ───────────── */
+.blast-node__tooltip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: #0B2545;
+  border: 1px solid #3E6E96;
+  color: #F4F7FA;
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 6px 10px;
+  border-radius: 3px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 10;
+  /* Arrow */
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.4));
+}
+
+.blast-node:hover .blast-node__tooltip {
+  display: block;
+}

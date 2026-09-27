@@ -1,0 +1,53 @@
+/* ── Repo Ripple — design system tokens ──────────────────────────────────── */
+:root {
+  --color-canvas:      #0B2545;
+  --color-surface:     #123A63;
+  --color-grid:        #3E6E96;
+  --color-wire-hover:  #8ECAE6;
+  --color-text:        #F4F7FA;
+  --color-risk-direct: #E63946;
+  --color-risk-down:   #F4A261;
+
+  --font-ui:   'IBM Plex Sans',  system-ui, sans-serif;
+  --font-code: 'IBM Plex Mono',  'Courier New', monospace;
+}
+
+/* ── Reset ───────────────────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-text);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.6;
+  overflow: hidden;
+}
+
+/* ── App shell: full-bleed canvas + right panel strip ───────────────────── */
+.app-shell {
+  display: flex;
+  width: 100vw;
+  height: 100vh;
+}
+
+/* Main canvas area fills remaining space */
+.app-canvas {
+  flex: 1 1 auto;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Right panel: scenario picker + guardrail panel (Person D) */
+.app-panel {
+  flex: 0 0 280px;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-surface);
+  border-left: 1px solid var(--color-grid);
+  overflow-y: auto;
+}
